@@ -24,7 +24,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.52.0/theme/seti.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.52.0/codemirror.min.css">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.52.0/mode/clike/clike.min.js"></script>
-    <script src=https://cdnjs.cloudflare.com/ajax/libs/jszip/3.2.2/jszip.min.js></script>
+    <script src=https://cdnjs.cloudflare.com/ajax/libs/pako/1.0.10/pako.min.js></script>
 
     <style>
         ::-webkit-scrollbar {
@@ -176,7 +176,6 @@
                 pending.end_column = e.length > 1 ? parseInt(e[1]) : 0;
             }
         }
-
         let set_location = (file, start_line, start_column, end_line, end_column) => {
             current.file = file;
             current.start_line = start_line;
@@ -204,7 +203,6 @@
             if (line == span[2]) { return col > span[3]; }
             return false;
         };
-
         let el_file_tree = document.getElementById("file_tree");
         let el_test_tree = document.getElementById("test_tree");
         let el_source = CodeMirror(document.getElementById("source"), {
@@ -214,145 +212,178 @@
             readOnly: true,
         });
 
-        el_source.doc.setValue("// Downloading coverage... ");
+        window.onload = function () {
+            el_source.doc.setValue("// Loading... ");
+            fetch("coverage.dat").then(response =>
+                response.arrayBuffer()
+            ).then(compressed =>
+                pako.inflate(new Uint8Array(compressed))
+            ).then(decompressed =>
+                JSON.parse(new TextDecoder("utf-8").decode(decompressed))
+            ).then(json => {
+                el_source.doc.setValue("// Select file from the left... ");
 
-        fetch("coverage.zip").then(response => response.arrayBuffer()).then(zipfile => {
-            el_source.doc.setValue("// Unzipping coverage... ");
-            JSZip.loadAsync(zipfile).then(function (zip) {
-                zip.file("coverage.json").async("string").then(function (text) {
-                    let json = JSON.parse(text);
-                    el_source.doc.setValue("// Select file from the left... ");
+                let revision = json.r;
+                let names = json.n;
+                let tests = json.t;
+                let spans = json.s;
+                let files = json.f;
 
-                    let revision = json.r;
-                    let names = json.n;
-                    let tests = json.t;
-                    let spans = json.s;
-                    let files = json.f;
-
-                    let glob = (nodes, spanIDs) => {
-                        nodes.forEach(node => {
-                            let data = node[1];
-                            if (data.s) {
-                                data.s.forEach(spanID => spanIDs.add(spanID));
-                            }
-                            if (data.c) {
-                                glob(data.c, spanIDs);
-                            }
-                        });
+                let glob_group = (file, groupID, span_ids) => {
+                    while (true) {
+                        let group = file.g[groupID];
+                        group.s.forEach(span_id => span_ids.add(span_id));
+                        if (!group.e) {
+                            break;
+                        }
+                        groupID = group.e;
                     };
+                };
 
-                    let markup = nodes => {
-                        let spanIDs = new Set();
-                        glob(nodes, spanIDs);
-                        el_source.operation(() => {
-                            spanIDs.forEach((spanID) => {
-                                let span = spans[spanID];
-                                el_source.doc.markText(
-                                    { "line": span[0] - 1, "ch": span[1] - 1 },
-                                    { "line": span[2] - 1, "ch": span[3] - 1 },
-                                    {
-                                        // inclusiveLeft: true,
-                                        className: "line-coverage",
-                                        startStyle: "line-coverage-start",
-                                        endStyle: "line-coverage-end",
-                                    });
-                            });
-                        });
-                    };
+                let coverage_spans = (file, data, span_ids) => {
+                    if (data.g != undefined) {
+                        glob_group(file, data.g, span_ids);
+                    }
+                    if (data.s != undefined) {
+                        data.s.forEach(span_id => span_ids.add(span_id));
+                    }
+                };
 
-                    let gather_tests = (coverage_nodes, test_nodes, from, to) => {
-                        let list = [];
-                        coverage_nodes.forEach(coverage_node => {
-                            let index = coverage_node[0];
-                            let coverage = coverage_node[1];
-                            let test = test_nodes[index];
-                            let test_id = test[0];
-                            let test_children = test[1];
-                            let test_name = names[test_id];
+                let glob_node = (file, nodes, span_ids) => {
+                    nodes.forEach(node => {
+                        let data = node[1];
+                        coverage_spans(file, data, span_ids);
+                        if (data.c) {
+                            glob_node(file, data.c, span_ids);
+                        }
+                    });
+                };
 
-                            if (coverage.s) {
-                                let match = coverage.s.some(spanID => {
-                                    let span = spans[spanID];
-                                    return !before(to.line + 1, to.ch + 1, span) && !after(from.line + 1, from.ch + 1, span)
+                let markup = file => {
+                    let span_ids = new Set();
+                    glob_node(file, file.c, span_ids);
+                    el_source.operation(() => {
+                        span_ids.forEach((span_id) => {
+                            let span = spans[span_id];
+                            el_source.doc.markText(
+                                { "line": span[0] - 1, "ch": span[1] - 1 },
+                                { "line": span[2] - 1, "ch": span[3] - 1 },
+                                {
+                                    // inclusiveLeft: true,
+                                    className: "line-coverage",
+                                    startStyle: "line-coverage-start",
+                                    endStyle: "line-coverage-end",
                                 });
-                                if (match) {
-                                    list.push(test_name + ".*");
-                                    return;
-                                }
-                            }
-                            if (coverage.c) {
-                                list = list.concat(gather_tests(coverage.c, test_children, from, to).map(child_name => test_name + "." + child_name));
-                            }
                         });
-                        return list;
-                    };
+                    });
+                };
 
-                    let load_source = (path) => {
-                        if (!files[path]) { return; }
+                let gather_tests = (file, coverage_nodes, test_nodes, from, to) => {
+                    let list = [];
+                    coverage_nodes.forEach(coverage_node => {
+                        let index = coverage_node[0];
+                        let coverage = coverage_node[1];
+                        let test = test_nodes[index];
+                        let test_id = test[0];
+                        let test_children = test[1];
+                        let test_name = names[test_id];
 
-                        for (let i = 0; i < el_file_tree.childNodes.length; i++) {
-                            let el = el_file_tree.childNodes[i];
-                            if (el.innerText == path) {
-                                el.classList.add("selected");
-                            } else {
-                                el.classList.remove("selected");
+                        let span_ids = new Set();
+                        coverage_spans(file, coverage, span_ids);
+
+                        let matched = false;
+                        for (const span_id of span_ids) {
+                            let span = spans[span_id];
+                            if (!before(to.line + 1, to.ch + 1, span) && !after(from.line + 1, from.ch + 1, span)) {
+                                list.push(test_name + ".*");
+                                return;
                             }
                         }
-                        el_source.doc.setValue("// Loading... ");
-                        fetch("https://raw.githubusercontent.com/google/swiftshader/" + revision + "/" + path)
-                            .then(response => response.text())
-                            .then(source => {
-                                el_source.doc.setValue(source);
-                                markup(files[path]);
-                                if (pending.start_line) {
-                                    var start = {
-                                        line: pending.start_line - 1,
-                                        ch: pending.start_column ? pending.start_column - 1 : 0
-                                    };
-                                    var end = {
-                                        line: pending.end_line ? pending.end_line - 1 : pending.start_line - 1,
-                                        ch: pending.end_column ? pending.end_column - 1 : 0
-                                    };
-                                    el_source.doc.setSelection(start, end);
-                                }
-                                pending = {};
-                                current.file = path;
-                            });
-                    };
 
-                    el_source.doc.on("beforeSelectionChange", (doc, selection) => {
-                        if (!files[current.file]) { return; }
-
-                        let range = selection.ranges[0];
-                        let from = range.head;
-                        let to = range.anchor;
-                        set_location(current.file, from.line + 1, from.ch + 1, to.line + 1, to.ch + 1);
-
-                        let filtered = gather_tests(files[current.file], tests, from, to);
-                        el_test_tree.innerHTML = "";
-                        filtered.forEach(test_name => {
-                            let element = document.createElement('p');
-                            element.className = "test-name";
-                            element.innerText = test_name;
-                            el_test_tree.appendChild(element);
-                        });
+                        if (coverage.c) {
+                            list = list.concat(gather_tests(file, coverage.c, test_children, from, to).map(child_name => test_name + "." + child_name));
+                        }
                     });
+                    return list;
+                };
 
-                    Object.keys(files).forEach(path => {
-                        let element = document.createElement('p');
-                        element.className = "file-path";
-                        element.innerText = path;
-                        element.onclick = () => { pending = {}; load_source(path); }
-                        el_file_tree.appendChild(element);
-                    });
-
-                    if (pending.file) {
-                        load_source(pending.file);
+                let update_selection = (from, to) => {
+                    if (from.line > to.line || (from.line == to.line && from.ch > to.ch)) {
+                        let tmp = from;
+                        from = to;
+                        to = tmp;
                     }
-                });
-            });
-        });
 
+                    let file = files[current.file];
+                    let filtered = gather_tests(file, file.c, tests, from, to);
+                    el_test_tree.innerHTML = "";
+                    filtered.forEach(test_name => {
+                        let element = document.createElement('p');
+                        element.className = "test-name";
+                        element.innerText = test_name;
+                        el_test_tree.appendChild(element);
+                    });
+                };
+
+                let load_source = (path) => {
+                    if (!files[path]) { return; }
+
+                    for (let i = 0; i < el_file_tree.childNodes.length; i++) {
+                        let el = el_file_tree.childNodes[i];
+                        if (el.innerText == path) {
+                            el.classList.add("selected");
+                        } else {
+                            el.classList.remove("selected");
+                        }
+                    }
+                    el_source.doc.setValue("// Loading... ");
+                    fetch("https://raw.githubusercontent.com/google/swiftshader/" + revision + "/" + path)
+                        .then(response => response.text())
+                        .then(source => {
+                            el_source.doc.setValue(source);
+                            current.file = path;
+                            markup(files[path]);
+                            if (pending.start_line) {
+                                var start = {
+                                    line: pending.start_line - 1,
+                                    ch: pending.start_column ? pending.start_column - 1 : 0
+                                };
+                                var end = {
+                                    line: pending.end_line ? pending.end_line - 1 : pending.start_line - 1,
+                                    ch: pending.end_column ? pending.end_column - 1 : 0
+                                };
+                                el_source.doc.setSelection(start, end);
+                                update_selection(start, end);
+                            }
+                            pending = {};
+                        });
+                };
+
+                el_source.doc.on("beforeSelectionChange", (doc, selection) => {
+                    if (!files[current.file]) { return; }
+
+                    let range = selection.ranges[0];
+                    let from = range.head;
+                    let to = range.anchor;
+
+                    set_location(current.file, from.line + 1, from.ch + 1, to.line + 1, to.ch + 1);
+
+                    update_selection(from, to);
+                });
+
+                Object.keys(files).forEach(path => {
+                    let element = document.createElement('p');
+                    element.className = "file-path";
+                    element.innerText = path;
+                    element.onclick = () => { pending = {}; load_source(path); }
+                    el_file_tree.appendChild(element);
+                });
+
+                if (pending.file) {
+                    load_source(pending.file);
+                }
+            });
+        };
     </script>
 </body>
 
