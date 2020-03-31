@@ -154,6 +154,7 @@
             end_line: 0,
             end_column: 0,
         };
+
         let pending = { ...current };
         {
             let url = new URL(location.href);
@@ -175,7 +176,8 @@
                 pending.end_line = e.length > 0 ? parseInt(e[0]) : 0;
                 pending.end_column = e.length > 1 ? parseInt(e[1]) : 0;
             }
-        }
+        };
+
         let set_location = (file, start_line, start_column, end_line, end_column) => {
             current.file = file;
             current.start_line = start_line;
@@ -198,11 +200,21 @@
             if (line == span[0]) { return col < span[1]; }
             return false;
         };
+
         let after = (line, col, span) => {
             if (line > span[2]) { return true; }
             if (line == span[2]) { return col > span[3]; }
             return false;
         };
+
+        let intersects = (span, from, to) => {
+            if (!before(to.line + 1, to.ch + 1, span) &&
+                !after(from.line + 1, from.ch + 1, span)) {
+                return true;
+            }
+            return false;
+        };
+
         let el_file_tree = document.getElementById("file_tree");
         let el_test_tree = document.getElementById("test_tree");
         let el_source = CodeMirror(document.getElementById("source"), {
@@ -278,33 +290,134 @@
                     });
                 };
 
-                let gather_tests = (file, coverage_nodes, test_nodes, from, to) => {
-                    let list = [];
-                    coverage_nodes.forEach(coverage_node => {
+                let NONE_OVERLAP = 0;
+                let ALL_OVERLAP = 1;
+                let SOME_OVERLAP = 2;
+
+                let gather_overlaps = (parent, file, coverage_nodes, from, to) => {
+                    if (!coverage_nodes) { return; }
+
+                    // Start by populating all the children nodes from the full
+                    // test lists. This includes nodes that do not have child
+                    // coverage data.
+                    for (var index = 0; index < parent.test.length; index++) {
+                        if (parent.children.has(index)) { continue; }
+
+                        let test_node = parent.test[index];
+                        let test_name_id = test_node[0];
+                        let test_name = names[test_name_id];
+                        let test_children = test_node[1];
+
+                        let node = {
+                            test: test_children,
+                            name: parent.name ? parent.name + "." + test_name : test_name,
+                            overlaps: new Map(parent.overlaps), // map: span_id -> OVERLAP
+                            children: new Map(), // map: index -> struct
+                            is_leaf: test_children.length == 0,
+                        };
+                        parent.children.set(index, node);
+                    }
+
+                    // Now update the children that do have coverage data.
+                    for (const coverage_node of coverage_nodes) {
                         let index = coverage_node[0];
                         let coverage = coverage_node[1];
-                        let test = test_nodes[index];
-                        let test_id = test[0];
-                        let test_children = test[1];
-                        let test_name = names[test_id];
+                        let node = parent.children.get(index);
 
                         let span_ids = new Set();
                         coverage_spans(file, coverage, span_ids);
 
-                        let matched = false;
+                        // Update the node overlaps based on the coverage spans.
                         for (const span_id of span_ids) {
-                            let span = spans[span_id];
-                            if (!before(to.line + 1, to.ch + 1, span) && !after(from.line + 1, from.ch + 1, span)) {
-                                list.push(test_name + ".*");
-                                return;
+                            if (intersects(spans[span_id], from, to)) {
+                                let overlap = parent.overlaps.get(span_id) || NONE_OVERLAP;
+                                overlap = (overlap == NONE_OVERLAP) ? ALL_OVERLAP : NONE_OVERLAP;
+                                node.overlaps.set(span_id, overlap);
                             }
                         }
 
-                        if (coverage.c) {
-                            list = list.concat(gather_tests(file, coverage.c, test_children, from, to).map(child_name => test_name + "." + child_name));
+                        // Generate the child nodes.
+                        gather_overlaps(node, file, coverage.c, from, to);
+
+                        // Gather all the spans used by the children.
+                        let all_spans = new Set();
+                        for (const [_, child] of node.children) {
+                            for (const [span, _] of child.overlaps) {
+                                all_spans.add(span);
+                            }
                         }
-                    });
-                    return list;
+
+                        // Update the node.overlaps based on the child overlaps.
+                        for (const span of all_spans) {
+                            let overlap = undefined;
+                            for (const [_, child] of node.children) {
+                                let child_overlap = child.overlaps.get(span);
+                                child_overlap = (child_overlap == undefined) ? NONE_OVERLAP : child_overlap;
+                                if (overlap == undefined) {
+                                    overlap = child_overlap;
+                                } else {
+                                    overlap = (child_overlap == overlap) ? overlap : SOME_OVERLAP
+                                }
+                            }
+                            node.overlaps.set(span, overlap);
+                        }
+
+                        // If all the node.overlaps are NONE_OVERLAP or ALL_OVERLAP
+                        // then there's no point holding on to the children -
+                        // we know all transitive children either fully overlap
+                        // or don't at all.
+                        let some_overlap = false;
+                        for (const [_, overlap] of node.overlaps) {
+                            if (overlap == SOME_OVERLAP) {
+                                some_overlap = true;
+                                break;
+                            }
+                        }
+
+                        if (!some_overlap) {
+                            node.children = null;
+                        }
+                    }
+                };
+
+                let gather_tests = (file, coverage_nodes, test_nodes, from, to) => {
+                    let out = [];
+
+                    let traverse = (parent) => {
+                        for (const [idx, node] of parent.children) {
+                            let do_traversal = false;
+                            let do_add = false;
+
+                            for (const [_, overlap] of node.overlaps) {
+                                switch (overlap) {
+                                    case SOME_OVERLAP:
+                                        do_traversal = true;
+                                        break;
+                                    case ALL_OVERLAP:
+                                        do_add = true;
+                                        break;
+                                }
+                            }
+
+                            if (do_add) {
+                                out.push(node.name + (node.is_leaf ? "" : ".*"));
+                            } else if (do_traversal) {
+                                traverse(node);
+                            }
+                        }
+                    };
+
+                    let tree = {
+                        test: test_nodes,
+                        overlaps: new Map(), // map: span_id -> OVERLAP
+                        children: new Map(), // map: index -> struct
+                    };
+
+                    gather_overlaps(tree, file, coverage_nodes, from, to);
+
+                    traverse(tree);
+
+                    return out;
                 };
 
                 let update_selection = (from, to) => {
