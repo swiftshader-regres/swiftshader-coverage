@@ -90,7 +90,7 @@
             border: 1px solid #eee;
         }
 
-        .file-path {
+        .file-div {
             margin: 0px;
             white-space: nowrap;
             padding: 2px;
@@ -98,12 +98,12 @@
             margin-bottom: 1px;
         }
 
-        .file-path:hover {
+        .file-div:hover {
             background-color: #303030;
             cursor: pointer;
         }
 
-        .file-path.selected {
+        .file-div.selected {
             background-color: #505050;
             color: #f0f0a0;
             cursor: pointer;
@@ -117,19 +117,45 @@
             margin-bottom: 1px;
         }
 
-        .line-coverage {
+        .file-coverage {
+            color: black;
+            width: 20pt;
+            padding-right: 3pt;
+            padding-left: 3px;
+            margin-right: 5pt;
+            display: inline-block;
+            text-align: center;
+            border-radius: 5px;
+        }
+
+        .with-coverage {
             background-color: #20d04080;
             border-width: 0px 0px 0px 0px;
         }
 
-        .line-coverage-start {
+        .with-coverage-start {
             border-left: solid 1px;
             border-color: #20f02080;
         }
 
-        .line-coverage-end {
+        .with-coverage-end {
             border-right: solid 1px;
             border-color: #20f02080;
+        }
+
+        .without-coverage {
+            background-color: #d0204080;
+            border-width: 0px 0px 0px 0px;
+        }
+
+        .without-coverage-start {
+            border-left: solid 1px;
+            border-color: #f0202080;
+        }
+
+        .without-coverage-end {
+            border-right: solid 1px;
+            border-color: #f0202080;
         }
     </style>
 </head>
@@ -272,6 +298,19 @@
                 };
 
                 let markup = file => {
+                    if (file.u) {
+                        for (span of file.u) {
+                            el_source.doc.markText(
+                                { "line": span[0] - 1, "ch": span[1] - 1 },
+                                { "line": span[2] - 1, "ch": span[3] - 1 },
+                                {
+                                    // inclusiveLeft: true,
+                                    className: "without-coverage",
+                                    startStyle: "without-coverage-start",
+                                    endStyle: "without-coverage-end",
+                                });
+                        }
+                    }
                     let span_ids = new Set();
                     glob_node(file, file.c, span_ids);
                     el_source.operation(() => {
@@ -282,9 +321,9 @@
                                 { "line": span[2] - 1, "ch": span[3] - 1 },
                                 {
                                     // inclusiveLeft: true,
-                                    className: "line-coverage",
-                                    startStyle: "line-coverage-start",
-                                    endStyle: "line-coverage-end",
+                                    className: "with-coverage",
+                                    startStyle: "with-coverage-start",
+                                    endStyle: "with-coverage-end",
                                 });
                         });
                     });
@@ -443,7 +482,7 @@
 
                     for (let i = 0; i < el_file_tree.childNodes.length; i++) {
                         let el = el_file_tree.childNodes[i];
-                        if (el.innerText == path) {
+                        if (el.path == path) {
                             el.classList.add("selected");
                         } else {
                             el.classList.remove("selected");
@@ -484,13 +523,36 @@
                     update_selection(from, to);
                 });
 
-                Object.keys(files).forEach(path => {
-                    let element = document.createElement('p');
-                    element.className = "file-path";
-                    element.innerText = path;
-                    element.onclick = () => { pending = {}; load_source(path); }
-                    el_file_tree.appendChild(element);
-                });
+                for (const path of Object.keys(files)) {
+                    let file = files[path];
+
+                    let div = document.createElement('div');
+                    div.className = "file-div";
+                    div.onclick = () => { pending = {}; load_source(path); }
+                    div.path = path;
+                    el_file_tree.appendChild(div);
+
+                    let coverage = document.createElement('span');
+                    coverage.className = "file-coverage";
+                    if (file.p != undefined) {
+                        let red = 1.0 - file.p;
+                        let green = file.p;
+                        let normalize = 1.0 / (red * red + green * green);
+                        red *= normalize;
+                        green *= normalize;
+                        coverage.innerText = Math.round(file.p * 100);
+                        coverage.style = "background-color: RGB(" + 255 * red + "," + 255 * green + ", 0" + ")";
+                    } else {
+                        coverage.innerText = "--";
+                        coverage.style = "background-color: RGB(180,180,180)";
+                    }
+                    div.appendChild(coverage);
+
+                    let filepath = document.createElement('span');
+                    filepath.className = "file-path";
+                    filepath.innerText = path;
+                    div.appendChild(filepath);
+                }
 
                 if (pending.file) {
                     load_source(pending.file);
